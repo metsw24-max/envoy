@@ -126,8 +126,9 @@ int Decoder::reassemble(Buffer::Instance& data) {
       const ssize_t value_len = content_length_end - value_start;
       if (value_len <= 0 || static_cast<size_t>(value_len) >= sizeof(len)) {
         // The value field is empty or implausibly long for a decimal length. The message is
-        // malformed and cannot be recovered. Exceptions must not be thrown on the request-processing
-        // path, so stop reassembly without dispatching the message rather than raising an error.
+        // malformed and cannot be recovered. Exceptions must not be thrown on the
+        // request-processing path, so stop reassembly without dispatching the message rather than
+        // raising an error.
         ENVOY_LOG(debug, "sip: invalid Content-Length value field width ({}); dropping message",
                   value_len);
         break;
