@@ -228,6 +228,22 @@ pub trait EnvoyListenerFilter {
   /// Returns None if the value is not found.
   fn get_filter_state_bytes<'a>(&'a self, key: &[u8]) -> Option<EnvoyBuffer<'a>>;
 
+  /// Set a typed filter state value with the given key and connection life span. The value is
+  /// deserialized by a registered `StreamInfo::FilterState::ObjectFactory` on the Envoy side. This
+  /// is useful for setting filter state objects that other Envoy filters expect to read as specific
+  /// C++ types (e.g., `PerConnectionCluster` used by TCP Proxy).
+  ///
+  /// Returns true if the operation is successful. This can fail if no ObjectFactory is registered
+  /// for the key or if deserialization fails.
+  fn set_filter_state_typed(&mut self, key: &[u8], value: &[u8]) -> bool;
+
+  /// Get the serialized value of a typed filter state object with the given key. The object must
+  /// support `serializeAsString()` on the Envoy side.
+  ///
+  /// Returns None if the key does not exist, the object does not support serialization, or the
+  /// filter state is not accessible.
+  fn get_filter_state_typed<'a>(&'a self, key: &[u8]) -> Option<EnvoyBuffer<'a>>;
+
   /// Set the downstream transport failure reason.
   fn set_downstream_transport_failure_reason(&mut self, reason: &str);
 
@@ -245,6 +261,24 @@ pub trait EnvoyListenerFilter {
   /// Set the string-typed dynamic metadata value with the given namespace and key value.
   fn set_dynamic_metadata_string(&mut self, namespace: &str, key: &str, value: &str);
 
+  /// Set the dynamic metadata value with the given namespace and key to raw bytes.
+  ///
+  /// The bytes are stored as the metadata value as is, so non-UTF-8 values are preserved. Read
+  /// them back with [`Self::get_dynamic_metadata_string`].
+  fn set_dynamic_metadata_bytes(&mut self, namespace: &str, key: &str, value: &[u8]);
+
+  /// Set multiple string-typed dynamic metadata entries under `namespace` in a single call.
+  ///
+  /// Equivalent to calling [`Self::set_dynamic_metadata_string`] once per entry but resolves the
+  /// namespace and merges into the metadata struct only once. Existing entries with the same key
+  /// are overwritten. Within `entries`, a later entry overwrites an earlier one with the same key.
+  /// An empty `entries` is a no-op and does not create the namespace.
+  fn set_dynamic_metadata_string_batch<'a>(
+    &mut self,
+    namespace: &'a str,
+    entries: &'a [(&'a str, &'a str)],
+  );
+
   /// Get the number-typed dynamic metadata value with the given namespace and key value.
   /// Returns None if the metadata is not found or is the wrong type.
   fn get_dynamic_metadata_number(&self, namespace: &str, key: &str) -> Option<f64>;
@@ -259,6 +293,30 @@ pub trait EnvoyListenerFilter {
   /// Get the requested server name (SNI) from the connection socket.
   /// Returns None if SNI is not available.
   fn get_requested_server_name<'a>(&'a self) -> Option<EnvoyBuffer<'a>>;
+
+  /// Get the value of the attribute with the given ID as a string.
+  ///
+  /// If the attribute is not found, not supported or is the wrong type, this returns `None`.
+  fn get_attribute_string<'a>(
+    &'a self,
+    attribute_id: abi::envoy_dynamic_module_type_attribute_id,
+  ) -> Option<EnvoyBuffer<'a>>;
+
+  /// Get the value of the attribute with the given ID as an integer.
+  ///
+  /// If the attribute is not found, not supported or is the wrong type, this returns `None`.
+  fn get_attribute_int(
+    &self,
+    attribute_id: abi::envoy_dynamic_module_type_attribute_id,
+  ) -> Option<i64>;
+
+  /// Get the value of the attribute with the given ID as a boolean.
+  ///
+  /// If the attribute is not found, not supported or is the wrong type, this returns `None`.
+  fn get_attribute_bool(
+    &self,
+    attribute_id: abi::envoy_dynamic_module_type_attribute_id,
+  ) -> Option<bool>;
 
   /// Set the requested server name (SNI) on the connection socket.
   fn set_requested_server_name(&mut self, name: &str);
@@ -459,6 +517,10 @@ pub trait EnvoyListenerFilterScheduler: Send + Sync {
   /// Once this is called, [`ListenerFilter::on_scheduled`] will be called with
   /// the same `event_id` on the worker thread where the filter is running IF
   /// by the time the event is committed, the filter is still alive.
+  ///
+  /// This is safe to call from any thread and is a no-op once the filter has been destroyed. The
+  /// module must join or quiesce any thread that may call this before worker shutdown so a
+  /// scheduled event cannot race the worker dispatcher teardown.
   fn commit(&self, event_id: u64);
 }
 
@@ -905,6 +967,35 @@ impl EnvoyListenerFilter for EnvoyListenerFilterImpl {
     }
   }
 
+  fn set_filter_state_typed(&mut self, key: &[u8], value: &[u8]) -> bool {
+    unsafe {
+      abi::envoy_dynamic_module_callback_listener_filter_set_filter_state_typed(
+        self.raw,
+        crate::bytes_to_module_buffer(key),
+        crate::bytes_to_module_buffer(value),
+      )
+    }
+  }
+
+  fn get_filter_state_typed(&self, key: &[u8]) -> Option<EnvoyBuffer<'_>> {
+    let mut result = abi::envoy_dynamic_module_type_envoy_buffer {
+      ptr: std::ptr::null(),
+      length: 0,
+    };
+    let success = unsafe {
+      abi::envoy_dynamic_module_callback_listener_filter_get_filter_state_typed(
+        self.raw,
+        crate::bytes_to_module_buffer(key),
+        &mut result as *mut _ as *mut _,
+      )
+    };
+    if success && !result.ptr.is_null() && result.length > 0 {
+      Some(unsafe { EnvoyBuffer::new_from_raw(result.ptr as *const _, result.length) })
+    } else {
+      None
+    }
+  }
+
   fn set_downstream_transport_failure_reason(&mut self, reason: &str) {
     unsafe {
       abi::envoy_dynamic_module_callback_listener_filter_set_downstream_transport_failure_reason(
@@ -947,6 +1038,41 @@ impl EnvoyListenerFilter for EnvoyListenerFilterImpl {
         str_to_module_buffer(namespace),
         str_to_module_buffer(key),
         str_to_module_buffer(value),
+      )
+    }
+  }
+
+  fn set_dynamic_metadata_bytes(&mut self, namespace: &str, key: &str, value: &[u8]) {
+    unsafe {
+      abi::envoy_dynamic_module_callback_listener_filter_set_dynamic_metadata_string(
+        self.raw,
+        str_to_module_buffer(namespace),
+        str_to_module_buffer(key),
+        crate::bytes_to_module_buffer(value),
+      )
+    }
+  }
+
+  fn set_dynamic_metadata_string_batch(&mut self, namespace: &str, entries: &[(&str, &str)]) {
+    // `pairs` borrows the key/value bytes of `entries`, which outlive this call. Envoy copies the
+    // bytes into the metadata Struct synchronously, so the pointers never dangle. An empty
+    // `entries` yields an empty Vec paired with a zero length the callback treats as a no-op.
+    let mut pairs: Vec<abi::envoy_dynamic_module_type_module_key_value_pair> =
+      Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+      pairs.push(abi::envoy_dynamic_module_type_module_key_value_pair {
+        key_ptr: key.as_ptr() as *const _,
+        key_length: key.len(),
+        value_ptr: value.as_ptr() as *const _,
+        value_length: value.len(),
+      });
+    }
+    unsafe {
+      abi::envoy_dynamic_module_callback_listener_filter_set_dynamic_metadata_string_batch(
+        self.raw,
+        str_to_module_buffer(namespace),
+        pairs.as_ptr(),
+        pairs.len(),
       )
     }
   }
@@ -996,6 +1122,66 @@ impl EnvoyListenerFilter for EnvoyListenerFilterImpl {
     };
     if success && !result.ptr.is_null() && result.length > 0 {
       Some(unsafe { EnvoyBuffer::new_from_raw(result.ptr as *const _, result.length) })
+    } else {
+      None
+    }
+  }
+
+  fn get_attribute_string(
+    &self,
+    attribute_id: abi::envoy_dynamic_module_type_attribute_id,
+  ) -> Option<EnvoyBuffer<'_>> {
+    let mut result = abi::envoy_dynamic_module_type_envoy_buffer {
+      ptr: std::ptr::null(),
+      length: 0,
+    };
+    let success = unsafe {
+      abi::envoy_dynamic_module_callback_listener_filter_get_attribute_string(
+        self.raw,
+        attribute_id,
+        &mut result as *mut _ as *mut _,
+      )
+    };
+    if success {
+      Some(unsafe { EnvoyBuffer::new_from_raw(result.ptr as *const _, result.length) })
+    } else {
+      None
+    }
+  }
+
+  fn get_attribute_int(
+    &self,
+    attribute_id: abi::envoy_dynamic_module_type_attribute_id,
+  ) -> Option<i64> {
+    let mut result: i64 = 0;
+    let success = unsafe {
+      abi::envoy_dynamic_module_callback_listener_filter_get_attribute_int(
+        self.raw,
+        attribute_id,
+        &mut result as *mut _ as *mut _,
+      )
+    };
+    if success {
+      Some(result)
+    } else {
+      None
+    }
+  }
+
+  fn get_attribute_bool(
+    &self,
+    attribute_id: abi::envoy_dynamic_module_type_attribute_id,
+  ) -> Option<bool> {
+    let mut result: bool = false;
+    let success = unsafe {
+      abi::envoy_dynamic_module_callback_listener_filter_get_attribute_bool(
+        self.raw,
+        attribute_id,
+        &mut result as *mut _ as *mut _,
+      )
+    };
+    if success {
+      Some(result)
     } else {
       None
     }

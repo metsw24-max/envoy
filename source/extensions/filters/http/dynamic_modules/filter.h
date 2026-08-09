@@ -2,6 +2,9 @@
 
 #include <atomic>
 
+#include "envoy/common/optref.h"
+#include "envoy/event/dispatcher.h"
+
 #include "source/common/tracing/null_span_impl.h"
 #include "source/extensions/dynamic_modules/dynamic_modules.h"
 #include "source/extensions/filters/http/common/pass_through_filter.h"
@@ -78,7 +81,7 @@ public:
 
   void sendLocalReply(Code code, absl::string_view body,
                       std::function<void(ResponseHeaderMap& headers)> modify_headers,
-                      const absl::optional<Grpc::Status::GrpcStatus> grpc_status,
+                      const std::optional<Grpc::Status::GrpcStatus> grpc_status,
                       absl::string_view details);
 
   // Drive the response encoder directly for the streaming-response ABI. These set
@@ -102,7 +105,7 @@ public:
 
   // Temporary storage for the serialized typed filter state value returned by
   // get_filter_state_typed. Valid until the end of the current event hook.
-  absl::optional<std::string> last_serialized_filter_state_;
+  std::optional<std::string> last_serialized_filter_state_;
 
   // Temporary holder for host metadata snapshots returned by host metadata getters.
   // Valid until the next metadata getter call on this filter.
@@ -125,28 +128,28 @@ public:
     if (decoder_callbacks_) {
       return decoder_callbacks_->requestHeaders();
     }
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   RequestTrailerMapOptRef requestTrailers() {
     if (decoder_callbacks_) {
       return decoder_callbacks_->requestTrailers();
     }
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   ResponseHeaderMapOptRef responseHeaders() {
     if (encoder_callbacks_) {
       return encoder_callbacks_->responseHeaders();
     }
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   ResponseTrailerMapOptRef responseTrailers() {
     if (encoder_callbacks_) {
       return encoder_callbacks_->responseTrailers();
     }
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   /**
@@ -244,6 +247,7 @@ public:
 
   bool hasConfig() const { return config_ != nullptr; }
   const DynamicModuleHttpFilterConfig& getFilterConfig() const { return *config_; }
+  const DynamicModuleHttpFilterConfigSharedPtr& getFilterConfigSharedPtr() const { return config_; }
   Stats::StatNameDynamicPool& getStatNamePool() { return stat_name_pool_; }
 
   /**
@@ -259,11 +263,12 @@ private:
   void* thisAsVoidPtr() { return static_cast<void*>(this); }
 
   /**
-   * Called when filter is destroyed via onDestroy() or destructor. Forwards the call to the
-   * module via on_http_filter_destroy_ and resets in_module_filter_ to null. Subsequent calls are a
+   * Detaches from the module, cancels the pending callouts and streams, and destroys the in-module
+   * filter. When `dispatcher` is given the destroy hook runs from its deferred deletion list, so
+   * that the in-module filter outlives any module event hook on the stack. Subsequent calls are a
    * no-op.
    */
-  void destroy();
+  void destroy(OptRef<Event::Dispatcher> dispatcher = {});
 
   /**
    * Registers this filter for downstream watermark callbacks once both decoder callbacks have been

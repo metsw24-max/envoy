@@ -658,6 +658,32 @@ TEST_F(SipDecoderTest, DecodeContentLengthOverlongValueFieldIsRejected) {
   EXPECT_EQ(0U, store_.counter("test.request").value());
 }
 
+TEST_F(SipDecoderTest, DecodeContentLengthLongerThanBuffer) {
+  initializeFilter(yaml);
+
+  // A Content-Length value field longer than the original 10-byte temporary buffer but within the
+  // decoder's width bound. The leading whitespace and zeros parse to 0, so this is a complete
+  // message and must be decoded as a request rather than dropped.
+  const std::string SIP_LONG_CONTENT_LENGTH =
+      "ACK sip:User.0000@tas01.defult.svc.cluster.local SIP/2.0\x0d\x0a"
+      "Call-ID: 1-3193@11.0.0.10\x0d\x0a"
+      "Via: SIP/2.0/TCP 11.0.0.10:15060;branch=z9hG4bK-3193-1-0\x0d\x0a"
+      "To: <sip:User.0000@tas01.defult.svc.cluster.local>\x0d\x0a"
+      "From: <sip:User.0001@tas01.defult.svc.cluster.local>;tag=1\x0d\x0a"
+      "Route: <sip:+16959000000:15306;role=anch;lr;transport=udp>\x0d\x0a"
+      "CSeq: 2 ACK\x0d\x0a"
+      "Contact: <sip:User.0001@11.0.0.10:15060;transport=TCP>;tag=1\x0d\x0a"
+      "Max-Forwards: 70\x0d\x0a"
+      "Content-Length:           0000000000000000\x0d\x0a"
+      "\x0d\x0a";
+  buffer_.add(SIP_LONG_CONTENT_LENGTH);
+
+  EXPECT_EQ(filter_->onData(buffer_, false), Network::FilterStatus::StopIteration);
+  EXPECT_EQ(1U, store_.counter("test.request").value());
+  EXPECT_EQ(1U, stats_.request_active_.value());
+  EXPECT_EQ(0U, store_.counter("test.response").value());
+}
+
 TEST_F(SipDecoderTest, HeaderTest) {
   StateNameValues stateNameValues_;
   EXPECT_EQ("Done", stateNameValues_.name(State::Done));

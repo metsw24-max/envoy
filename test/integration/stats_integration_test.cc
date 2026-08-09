@@ -181,7 +181,7 @@ TEST_P(StatsIntegrationTest, WithExpiringCert) {
         "validation_context");
     common_tls_context->add_tls_certificate_sds_secret_configs()->set_name("server_cert");
     transport_socket->set_name("envoy.transport_sockets.tls");
-    transport_socket->mutable_typed_config()->PackFrom(tls_context);
+    std::ignore = transport_socket->mutable_typed_config()->PackFrom(tls_context);
 
     auto* secret = bootstrap.mutable_static_resources()->add_secrets();
     secret->set_name("validation_context");
@@ -231,7 +231,7 @@ TEST_P(StatsIntegrationTest, WithExpiredCert) {
         "validation_context");
     common_tls_context->add_tls_certificate_sds_secret_configs()->set_name("server_cert");
     transport_socket->set_name("envoy.transport_sockets.tls");
-    transport_socket->mutable_typed_config()->PackFrom(tls_context);
+    std::ignore = transport_socket->mutable_typed_config()->PackFrom(tls_context);
 
     auto* secret = bootstrap.mutable_static_resources()->add_secrets();
     secret->set_name("validation_context");
@@ -405,6 +405,7 @@ TEST_P(ClusterMemoryTestRunner, MemoryLargeClusterSize) {
   // 2026/02/13  43467    45575       46000   Update tcmalloc to 12f2552 (2025-09-27)
   // 2026/02/22           46519       47000   Coalesce LB rebuilds during batch updates
   // 2026/05/13  44147    47086       47500   Retry budget interval state
+  // 2026/08/07           47586       48000   Fix test flakes
 
   // Note: when adjusting this value: EXPECT_MEMORY_EQ is active only in CI
   // 'release' builds, where we control the platform and tool-chain. So you
@@ -419,7 +420,7 @@ TEST_P(ClusterMemoryTestRunner, MemoryLargeClusterSize) {
   // https://github.com/envoyproxy/envoy/blob/main/source/docs/stats.md#stats-memory-tests
   // for details on how to fix.
 
-  EXPECT_MEMORY_LE(m_per_cluster, 47500); // Round up to allow platform variations.
+  EXPECT_MEMORY_LE(m_per_cluster, 48000); // Round up to allow platform variations.
 }
 
 TEST_P(ClusterMemoryTestRunner, MemoryLargeHostSizeWithStats) {

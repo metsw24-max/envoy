@@ -2,6 +2,7 @@
 #include <chrono>
 
 #include "envoy/network/listen_socket.h"
+#include "envoy/registry/registry.h"
 #include "envoy/stream_info/stream_info.h"
 
 #include "source/common/buffer/buffer_impl.h"
@@ -12,6 +13,7 @@
 #include "source/common/router/string_accessor_impl.h"
 #include "source/common/stats/utility.h"
 #include "source/extensions/dynamic_modules/abi/abi.h"
+#include "source/extensions/dynamic_modules/abi_context_accessors.h"
 #include "source/extensions/filters/listener/dynamic_modules/filter.h"
 #include "source/extensions/filters/listener/dynamic_modules/filter_config.h"
 
@@ -744,29 +746,6 @@ bool envoy_dynamic_module_callback_listener_filter_get_socket_option_bytes(
   return true;
 }
 
-void envoy_dynamic_module_callback_listener_filter_set_dynamic_metadata(
-    envoy_dynamic_module_type_listener_filter_envoy_ptr filter_envoy_ptr,
-    envoy_dynamic_module_type_module_buffer filter_namespace,
-    envoy_dynamic_module_type_module_buffer key, envoy_dynamic_module_type_module_buffer value) {
-  auto* filter = static_cast<DynamicModuleListenerFilter*>(filter_envoy_ptr);
-  auto* callbacks = filter->callbacks();
-
-  if (callbacks == nullptr || filter_namespace.ptr == nullptr || key.ptr == nullptr ||
-      value.ptr == nullptr) {
-    return;
-  }
-
-  std::string ns(filter_namespace.ptr, filter_namespace.length);
-  std::string key_str(key.ptr, key.length);
-  std::string value_str(value.ptr, value.length);
-
-  Protobuf::Struct metadata;
-  auto& fields = *metadata.mutable_fields();
-  fields[key_str].set_string_value(value_str);
-
-  callbacks->setDynamicMetadata(ns, metadata);
-}
-
 bool envoy_dynamic_module_callback_listener_filter_set_filter_state(
     envoy_dynamic_module_type_listener_filter_envoy_ptr filter_envoy_ptr,
     envoy_dynamic_module_type_module_buffer key, envoy_dynamic_module_type_module_buffer value) {
@@ -813,6 +792,78 @@ bool envoy_dynamic_module_callback_listener_filter_get_filter_state(
   absl::string_view value = accessor->asString();
   value_out->ptr = const_cast<char*>(value.data());
   value_out->length = value.size();
+  return true;
+}
+
+bool envoy_dynamic_module_callback_listener_filter_set_filter_state_typed(
+    envoy_dynamic_module_type_listener_filter_envoy_ptr filter_envoy_ptr,
+    envoy_dynamic_module_type_module_buffer key, envoy_dynamic_module_type_module_buffer value) {
+  auto* filter = static_cast<DynamicModuleListenerFilter*>(filter_envoy_ptr);
+  auto* callbacks = filter->callbacks();
+
+  if (callbacks == nullptr || key.ptr == nullptr || value.ptr == nullptr) {
+    return false;
+  }
+
+  absl::string_view key_view(key.ptr, key.length);
+  absl::string_view value_view(value.ptr, value.length);
+
+  auto* factory =
+      Registry::FactoryRegistry<StreamInfo::FilterState::ObjectFactory>::getFactory(key_view);
+  if (factory == nullptr) {
+    ENVOY_LOG_TO_LOGGER(Envoy::Logger::Registry::getLog(Envoy::Logger::Id::dynamic_modules), debug,
+                        "no ObjectFactory registered for filter state key '{}'", key_view);
+    return false;
+  }
+
+  auto object = factory->createFromBytes(value_view);
+  if (object == nullptr) {
+    ENVOY_LOG_TO_LOGGER(Envoy::Logger::Registry::getLog(Envoy::Logger::Id::dynamic_modules), debug,
+                        "ObjectFactory failed to create object for filter state key '{}'",
+                        key_view);
+    return false;
+  }
+
+  callbacks->filterState().setData(key_view, std::move(object),
+                                   StreamInfo::FilterState::LifeSpan::Connection);
+  return true;
+}
+
+bool envoy_dynamic_module_callback_listener_filter_get_filter_state_typed(
+    envoy_dynamic_module_type_listener_filter_envoy_ptr filter_envoy_ptr,
+    envoy_dynamic_module_type_module_buffer key,
+    envoy_dynamic_module_type_envoy_buffer* value_out) {
+  auto* filter = static_cast<DynamicModuleListenerFilter*>(filter_envoy_ptr);
+  auto* callbacks = filter->callbacks();
+
+  if (callbacks == nullptr || key.ptr == nullptr) {
+    value_out->ptr = nullptr;
+    value_out->length = 0;
+    return false;
+  }
+
+  absl::string_view key_view(key.ptr, key.length);
+  const auto* object = callbacks->filterState().getDataReadOnlyGeneric(key_view);
+  if (object == nullptr) {
+    value_out->ptr = nullptr;
+    value_out->length = 0;
+    return false;
+  }
+
+  auto serialized = object->serializeAsString();
+  if (!serialized.has_value()) {
+    ENVOY_LOG_TO_LOGGER(Envoy::Logger::Registry::getLog(Envoy::Logger::Id::dynamic_modules), debug,
+                        "filter state object for key '{}' does not support serialization",
+                        key_view);
+    value_out->ptr = nullptr;
+    value_out->length = 0;
+    return false;
+  }
+
+  // Store the serialized string on the filter so it outlives the current event hook.
+  filter->last_serialized_filter_state_ = std::move(serialized.value());
+  value_out->ptr = const_cast<char*>(filter->last_serialized_filter_state_->data());
+  value_out->length = filter->last_serialized_filter_state_->size();
   return true;
 }
 
@@ -961,6 +1012,31 @@ void envoy_dynamic_module_callback_listener_filter_set_dynamic_metadata_number(
   Protobuf::Struct metadata;
   auto& fields = *metadata.mutable_fields();
   fields[key_str].set_number_value(value);
+
+  callbacks->setDynamicMetadata(ns, metadata);
+}
+
+void envoy_dynamic_module_callback_listener_filter_set_dynamic_metadata_string_batch(
+    envoy_dynamic_module_type_listener_filter_envoy_ptr filter_envoy_ptr,
+    envoy_dynamic_module_type_module_buffer filter_namespace,
+    const envoy_dynamic_module_type_module_key_value_pair* entries, size_t entries_size) {
+  auto* filter = static_cast<DynamicModuleListenerFilter*>(filter_envoy_ptr);
+  auto* callbacks = filter->callbacks();
+
+  if (callbacks == nullptr || filter_namespace.ptr == nullptr || entries_size == 0) {
+    // An empty batch is a no-op and must not create the namespace.
+    return;
+  }
+
+  std::string ns(filter_namespace.ptr, filter_namespace.length);
+  Protobuf::Struct metadata;
+  auto& fields = *metadata.mutable_fields();
+  for (size_t i = 0; i < entries_size; i++) {
+    const auto& entry = entries[i];
+    absl::string_view key_view(entry.key_ptr, entry.key_length);
+    absl::string_view value_view(entry.value_ptr, entry.value_length);
+    fields[key_view].set_string_value(value_view);
+  }
 
   callbacks->setDynamicMetadata(ns, metadata);
 }
@@ -1240,6 +1316,40 @@ uint32_t envoy_dynamic_module_callback_listener_filter_get_worker_index(
     envoy_dynamic_module_type_listener_filter_envoy_ptr filter_envoy_ptr) {
   auto filter = static_cast<DynamicModuleListenerFilter*>(filter_envoy_ptr);
   return filter->workerIndex();
+}
+
+bool envoy_dynamic_module_callback_listener_filter_get_attribute_string(
+    envoy_dynamic_module_type_listener_filter_envoy_ptr filter_envoy_ptr,
+    envoy_dynamic_module_type_attribute_id attribute_id,
+    envoy_dynamic_module_type_envoy_buffer* result) {
+  auto* filter = static_cast<DynamicModuleListenerFilter*>(filter_envoy_ptr);
+  auto* callbacks = filter->callbacks();
+  if (callbacks == nullptr) {
+    return false;
+  }
+  return ContextAccessor::getAttributeString(callbacks->streamInfo(), attribute_id, result);
+}
+
+bool envoy_dynamic_module_callback_listener_filter_get_attribute_int(
+    envoy_dynamic_module_type_listener_filter_envoy_ptr filter_envoy_ptr,
+    envoy_dynamic_module_type_attribute_id attribute_id, uint64_t* result) {
+  auto* filter = static_cast<DynamicModuleListenerFilter*>(filter_envoy_ptr);
+  auto* callbacks = filter->callbacks();
+  if (callbacks == nullptr) {
+    return false;
+  }
+  return ContextAccessor::getAttributeInt(callbacks->streamInfo(), attribute_id, result);
+}
+
+bool envoy_dynamic_module_callback_listener_filter_get_attribute_bool(
+    envoy_dynamic_module_type_listener_filter_envoy_ptr filter_envoy_ptr,
+    envoy_dynamic_module_type_attribute_id attribute_id, bool* result) {
+  auto* filter = static_cast<DynamicModuleListenerFilter*>(filter_envoy_ptr);
+  auto* callbacks = filter->callbacks();
+  if (callbacks == nullptr) {
+    return false;
+  }
+  return ContextAccessor::getAttributeBool(callbacks->streamInfo(), attribute_id, result);
 }
 
 } // extern "C"

@@ -1630,7 +1630,7 @@ TEST_F(HttpConnectionManagerImplTest, TestSrdsRouteFound) {
 TEST_F(HttpConnectionManagerImplTest, NewConnection) {
   setup(SetupOpts().setUseSrds(true));
 
-  filter_callbacks_.connection_.stream_info_.protocol_ = absl::nullopt;
+  filter_callbacks_.connection_.stream_info_.protocol_ = std::nullopt;
   EXPECT_CALL(filter_callbacks_.connection_.stream_info_, protocol());
   EXPECT_EQ(Network::FilterStatus::Continue, conn_manager_->onNewConnection());
   EXPECT_EQ(0U, stats_.named_.downstream_cx_http3_total_.value());
@@ -2693,8 +2693,8 @@ TEST_F(HttpConnectionManagerImplTest, CommonDurationDownstreamConnectionTimePoin
   const MonotonicTime connection_begin(std::chrono::milliseconds(5));
   filter_callbacks_.connection_.stream_info_.start_time_monotonic_ = connection_begin;
 
-  absl::optional<MonotonicTime> logged_connection_begin;
-  absl::optional<MonotonicTime> logged_connection_end;
+  std::optional<MonotonicTime> logged_connection_begin;
+  std::optional<MonotonicTime> logged_connection_end;
   EXPECT_CALL(*handler, log(_, _))
       .WillOnce(Invoke([&](const Formatter::Context&, const StreamInfo::StreamInfo& stream_info) {
         auto timing = stream_info.downstreamTiming();
@@ -2733,6 +2733,61 @@ TEST_F(HttpConnectionManagerImplTest, CommonDurationDownstreamConnectionTimePoin
   EXPECT_EQ(MonotonicTime(std::chrono::milliseconds(30)), logged_connection_end.value());
 }
 
+// The COMMON_DURATION downstream TLS handshake time points (DS_HS_BEG/DS_HS_END) are recorded at
+// connection level and copied onto each request-level stream info for access logging.
+TEST_F(HttpConnectionManagerImplTest, CommonDurationDownstreamHandshakeTimePoints) {
+  std::shared_ptr<AccessLog::MockInstance> handler(new NiceMock<AccessLog::MockInstance>());
+  access_logs_ = {handler};
+  setup();
+
+  // The downstream TLS handshake happened at connection level, before the stream is created.
+  const MonotonicTime handshake_start(std::chrono::milliseconds(5));
+  const MonotonicTime handshake_complete(std::chrono::milliseconds(8));
+  filter_callbacks_.connection_.stream_info_.downstream_timing_.setDownstreamHandshakeStart(
+      handshake_start);
+  filter_callbacks_.connection_.stream_info_.downstream_timing_.setDownstreamHandshakeComplete(
+      handshake_complete);
+
+  std::optional<MonotonicTime> logged_handshake_start;
+  std::optional<MonotonicTime> logged_handshake_complete;
+  EXPECT_CALL(*handler, log(_, _))
+      .WillOnce(Invoke([&](const Formatter::Context&, const StreamInfo::StreamInfo& stream_info) {
+        auto timing = stream_info.downstreamTiming();
+        ASSERT_TRUE(timing.has_value());
+        logged_handshake_start = timing->downstreamHandshakeStart();
+        logged_handshake_complete = timing->downstreamHandshakeComplete();
+      }));
+
+  Buffer::OwnedImpl fake_input("input");
+  conn_manager_->createCodec(fake_input);
+
+  EXPECT_CALL(*codec_, dispatch(_)).WillOnce(Invoke([&](Buffer::Instance&) -> Http::Status {
+    decoder_ = &conn_manager_->newStream(response_encoder_);
+    RequestHeaderMapPtr headers{
+        new TestRequestHeaderMapImpl{{":authority", "host"}, {":path", "/"}, {":method", "GET"}}};
+    decoder_->decodeHeaders(std::move(headers), /*end_stream=*/false);
+    return Http::okStatus();
+  }));
+
+  conn_manager_->onData(fake_input, /*end_stream=*/false);
+
+  // The request-level stream info reflects the connection-level handshake time points.
+  auto hs_start = decoder_->streamInfo().downstreamTiming().downstreamHandshakeStart();
+  ASSERT_TRUE(hs_start.has_value());
+  EXPECT_EQ(handshake_start, hs_start.value());
+  auto hs_complete = decoder_->streamInfo().downstreamTiming().downstreamHandshakeComplete();
+  ASSERT_TRUE(hs_complete.has_value());
+  EXPECT_EQ(handshake_complete, hs_complete.value());
+
+  // Close the connection so the access logger runs.
+  filter_callbacks_.connection_.raiseEvent(Network::ConnectionEvent::RemoteClose);
+
+  ASSERT_TRUE(logged_handshake_start.has_value());
+  EXPECT_EQ(handshake_start, logged_handshake_start.value());
+  ASSERT_TRUE(logged_handshake_complete.has_value());
+  EXPECT_EQ(handshake_complete, logged_handshake_complete.value());
+}
+
 // The COMMON_DURATION downstream connection time points are shared by all streams on a connection.
 // Every concurrent stream reports the same DS_CX_BEG, and every stream active when the connection
 // closes records DS_CX_END.
@@ -2745,7 +2800,7 @@ TEST_F(HttpConnectionManagerImplTest, CommonDurationDownstreamConnectionTimePoin
   const MonotonicTime connection_begin(std::chrono::milliseconds(5));
   filter_callbacks_.connection_.stream_info_.start_time_monotonic_ = connection_begin;
 
-  std::vector<absl::optional<MonotonicTime>> logged_connection_ends;
+  std::vector<std::optional<MonotonicTime>> logged_connection_ends;
   EXPECT_CALL(*handler, log(_, _))
       .Times(2)
       .WillRepeatedly(

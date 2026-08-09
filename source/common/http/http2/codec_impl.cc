@@ -186,14 +186,8 @@ int reasonToReset(StreamResetReason reason, bool response_end_stream_sent) {
   case StreamResetReason::RemoteResetNoError:
     return OGHTTP2_NO_ERROR;
   case StreamResetReason::ProtocolError:
-    if (!Runtime::runtimeFeatureEnabled("envoy.reloadable_features.reset_with_error")) {
-      return OGHTTP2_NO_ERROR;
-    }
     return OGHTTP2_PROTOCOL_ERROR;
   default:
-    if (!Runtime::runtimeFeatureEnabled("envoy.reloadable_features.reset_with_error")) {
-      return OGHTTP2_NO_ERROR;
-    }
     // If the response has been fully sent then we reset with OGHTTP2_NO_ERROR to tell
     // there is no transport level error.
     return response_end_stream_sent ? OGHTTP2_NO_ERROR : OGHTTP2_INTERNAL_ERROR;
@@ -656,7 +650,7 @@ void ConnectionImpl::ClientStreamImpl::decodeHeaders() {
   // In UHV mode the :status header at this point can be malformed, as it is validated
   // later on in the response_decoder_.decodeHeaders() call.
   // Account for this here.
-  absl::optional<uint64_t> status_opt = Http::Utility::getResponseStatusOrNullopt(*headers);
+  std::optional<uint64_t> status_opt = Http::Utility::getResponseStatusOrNullopt(*headers);
   if (!status_opt.has_value()) {
     // In case the status is invalid or missing, the response_decoder_.decodeHeaders() will fail the
     // request
@@ -1581,25 +1575,11 @@ Status ConnectionImpl::onStreamClose(StreamImpl* stream, uint32_t error_code) {
           // depending whether the connection is upstream or downstream.
           reason = getMessagingErrorResetReason();
         } else {
-          if (Runtime::runtimeFeatureEnabled("envoy.reloadable_features.reset_with_error")) {
-            reason = errorCodeToResetReason(error_code);
-            if (error_code == OGHTTP2_REFUSED_STREAM) {
-              stream->setDetails(Http2ResponseCodeDetails::get().remote_refused);
-            } else {
-              stream->setDetails(Http2ResponseCodeDetails::get().remote_reset);
-            }
+          reason = errorCodeToResetReason(error_code);
+          if (error_code == OGHTTP2_REFUSED_STREAM) {
+            stream->setDetails(Http2ResponseCodeDetails::get().remote_refused);
           } else {
-            if (error_code == OGHTTP2_REFUSED_STREAM) {
-              reason = StreamResetReason::RemoteRefusedStreamReset;
-              stream->setDetails(Http2ResponseCodeDetails::get().remote_refused);
-            } else {
-              if (error_code == OGHTTP2_CONNECT_ERROR) {
-                reason = StreamResetReason::ConnectError;
-              } else {
-                reason = StreamResetReason::RemoteReset;
-              }
-              stream->setDetails(Http2ResponseCodeDetails::get().remote_reset);
-            }
+            stream->setDetails(Http2ResponseCodeDetails::get().remote_reset);
           }
         }
         stream->runResetCallbacks(reason, absl::string_view());
@@ -2557,7 +2537,7 @@ Http::Status ServerConnectionImpl::dispatch(Buffer::Instance& data) {
   return ConnectionImpl::dispatch(data);
 }
 
-absl::optional<int> ServerConnectionImpl::checkHeaderNameForUnderscores(
+std::optional<int> ServerConnectionImpl::checkHeaderNameForUnderscores(
     [[maybe_unused]] absl::string_view header_name) {
 #ifndef ENVOY_ENABLE_UHV
   // This check has been moved to UHV
@@ -2579,7 +2559,7 @@ absl::optional<int> ServerConnectionImpl::checkHeaderNameForUnderscores(
   // Workaround for gcc not understanding [[maybe_unused]] for class members.
   (void)headers_with_underscores_action_;
 #endif
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 } // namespace Http2

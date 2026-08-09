@@ -33,7 +33,7 @@ public:
   uint64_t id() const override { return 1; }
   bool closingWithIncompleteStream() const override { return false; }
   uint32_t numActiveStreams() const override { return active_streams_; }
-  absl::optional<Http::Protocol> protocol() const override { return absl::nullopt; }
+  std::optional<Http::Protocol> protocol() const override { return std::nullopt; }
   void onEvent(Network::ConnectionEvent event) override {
     parent_.onConnectionEvent(*this, "", event);
   }
@@ -43,7 +43,7 @@ public:
     ASSERT_TRUE(testClient != nullptr);
     testClient->active_streams_++;
   }
-  int64_t currentUnusedCapacity() const override {
+  uint32_t currentUnusedCapacity() const override {
     if (capacity_override_.has_value()) {
       return capacity_override_.value();
     }
@@ -68,7 +68,7 @@ public:
   bool supportsEarlyData() const override { return supports_early_data_; }
   uint32_t active_streams_{};
 
-  absl::optional<uint64_t> capacity_override_;
+  std::optional<uint32_t> capacity_override_;
 
 private:
   bool supports_early_data_;
@@ -236,7 +236,7 @@ public:
   Event::DispatcherPtr dispatcher_;
   NiceMock<Server::MockOverloadManager> overload_manager_;
   uint32_t max_connection_duration_ = 5000;
-  absl::optional<std::chrono::milliseconds> max_connection_duration_opt_{max_connection_duration_};
+  std::optional<std::chrono::milliseconds> max_connection_duration_opt_{max_connection_duration_};
   uint32_t stream_limit_ = 100;
   uint32_t concurrent_streams_ = 1;
   Upstream::ClusterConnectivityState state_;
@@ -361,10 +361,63 @@ TEST_F(ConnPoolImplBaseTest, ExplicitPreconnectNotHealthy) {
   EXPECT_FALSE(pool_.maybePreconnectImpl(1));
 }
 
+TEST_F(ConnPoolImplBaseTest, PreconnectIfEligible) {
+  ON_CALL(*cluster_, perUpstreamPreconnectRatio).WillByDefault(Return(1.5));
+  ON_CALL(*cluster_, shouldPreconnect(_)).WillByDefault(Return(true));
+
+  // One on-demand connection, one preconnect.
+  EXPECT_CALL(pool_, instantiateActiveClient).Times(2);
+  auto cancelable = pool_.newStreamImpl(context_, /*can_send_early_data=*/false);
+  CHECK_STATE(0 /*active*/, 1 /*pending*/, 2 /*connecting capacity*/);
+  EXPECT_EQ(2U, cluster_->trafficStats()->upstream_cx_total_.value());
+  EXPECT_EQ(0U, cluster_->trafficStats()->upstream_cx_preconnect_skipped_.value());
+
+  cancelable->cancel(ConnectionPool::CancelPolicy::CloseExcess);
+  pool_.destructAllConnections();
+}
+
+TEST_F(ConnPoolImplBaseTest, NoPreconnectIfNotEligible) {
+  ON_CALL(*cluster_, perUpstreamPreconnectRatio).WillByDefault(Return(1.5));
+  ON_CALL(*cluster_, shouldPreconnect(_)).WillByDefault(Return(false));
+
+  // One on-demand connection, no preconnects.
+  EXPECT_CALL(pool_, instantiateActiveClient);
+  auto cancelable = pool_.newStreamImpl(context_, /*can_send_early_data=*/false);
+  CHECK_STATE(0 /*active*/, 1 /*pending*/, 1 /*connecting capacity*/);
+  EXPECT_EQ(1U, cluster_->trafficStats()->upstream_cx_total_.value());
+  EXPECT_EQ(1U, cluster_->trafficStats()->upstream_cx_preconnect_skipped_.value());
+
+  cancelable->cancel(ConnectionPool::CancelPolicy::CloseExcess);
+  pool_.destructAllConnections();
+}
+
+TEST_F(ConnPoolImplBaseTest, ExplicitPreconnectEligible) {
+  ON_CALL(*cluster_, perUpstreamPreconnectRatio).WillByDefault(Return(1.5));
+  ON_CALL(*cluster_, shouldPreconnect(_)).WillByDefault(Return(true));
+
+  // Expect one preconnect.
+  EXPECT_CALL(pool_, instantiateActiveClient);
+  EXPECT_TRUE(pool_.maybePreconnectImpl(1));
+  EXPECT_EQ(1U, cluster_->trafficStats()->upstream_cx_total_.value());
+  EXPECT_EQ(0U, cluster_->trafficStats()->upstream_cx_preconnect_skipped_.value());
+
+  pool_.destructAllConnections();
+}
+
+TEST_F(ConnPoolImplBaseTest, ExplicitPreconnectNotEligible) {
+  ON_CALL(*cluster_, perUpstreamPreconnectRatio).WillByDefault(Return(1.5));
+  ON_CALL(*cluster_, shouldPreconnect(_)).WillByDefault(Return(false));
+
+  // Preconnects are skipped.
+  EXPECT_FALSE(pool_.maybePreconnectImpl(1));
+  EXPECT_EQ(0U, cluster_->trafficStats()->upstream_cx_total_.value());
+  EXPECT_EQ(1U, cluster_->trafficStats()->upstream_cx_preconnect_skipped_.value());
+}
+
 TEST_F(ConnPoolImplDispatcherBaseTest, MaxConnectionDurationTimerNull) {
   // Force a null max connection duration optional.
   // newActiveClientAndStream() will expect the connection duration timer to remain null.
-  max_connection_duration_opt_ = absl::nullopt;
+  max_connection_duration_opt_ = std::nullopt;
   newActiveClientAndStream();
   closeStreamAndDrainClient();
 }

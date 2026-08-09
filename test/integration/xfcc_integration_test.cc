@@ -162,7 +162,7 @@ void XfccIntegrationTest::initialize() {
     san_matcher->set_san_type(
         envoy::extensions::transport_sockets::tls::v3::SubjectAltNameMatcher::DNS);
     transport_socket->set_name("envoy.transport_sockets.tls");
-    transport_socket->mutable_typed_config()->PackFrom(context);
+    std::ignore = transport_socket->mutable_typed_config()->PackFrom(context);
   });
 
   if (tls_) {
@@ -241,6 +241,25 @@ TEST_P(XfccIntegrationTest, MtlsSanitizeSetSubject) {
   initialize();
   testRequestAndResponseWithXfccHeader(previous_xfcc_,
                                        current_xfcc_by_hash_ + ";" + client_subject_);
+}
+
+TEST_P(XfccIntegrationTest, MtlsSanitizeSetIssuer) {
+  fcc_ = envoy::extensions::filters::network::http_connection_manager::v3::HttpConnectionManager::
+      SANITIZE_SET;
+  sccd_.set_issuer(true);
+  initialize();
+  testRequestAndResponseWithXfccHeader(previous_xfcc_,
+                                       current_xfcc_by_hash_ + ";" + client_issuer_);
+}
+
+TEST_P(XfccIntegrationTest, MtlsSanitizeSetSubjectIssuer) {
+  fcc_ = envoy::extensions::filters::network::http_connection_manager::v3::HttpConnectionManager::
+      SANITIZE_SET;
+  sccd_.mutable_subject()->set_value(true);
+  sccd_.set_issuer(true);
+  initialize();
+  testRequestAndResponseWithXfccHeader(previous_xfcc_, current_xfcc_by_hash_ + ";" +
+                                                           client_subject_ + ";" + client_issuer_);
 }
 
 TEST_P(XfccIntegrationTest, MtlsSanitizeSetUri) {

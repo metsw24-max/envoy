@@ -12,11 +12,14 @@
 #include "test/extensions/transport_sockets/starttls/starttls_integration_test.pb.validate.h"
 #include "test/integration/integration.h"
 #include "test/integration/ssl_utility.h"
+#include "test/mocks/network/connection.h"
+#include "test/mocks/server/server_factory_context.h"
 #include "test/test_common/registry.h"
 
 #include "gtest/gtest.h"
 
 namespace Envoy {
+using testing::NiceMock;
 
 // Simple filter for test purposes. This filter will be injected into the filter chain during
 // tests.
@@ -232,7 +235,8 @@ void StartTlsIntegrationTest::initialize() {
     tls_certificate->mutable_private_key()->set_filename(
         TestEnvironment::runfilesPath("test/config/integration/certs/clientkey.pem"));
     cluster->mutable_transport_socket()->set_name("envoy.transport_sockets.starttls");
-    cluster->mutable_transport_socket()->mutable_typed_config()->PackFrom(starttls_config);
+    std::ignore =
+        cluster->mutable_transport_socket()->mutable_typed_config()->PackFrom(starttls_config);
   });
 
   // Modifications to ConfigHelper::baseConfig.

@@ -253,6 +253,18 @@ INSTANTIATE_TEST_SUITE_P(EnvoyQuicClientSessionTests, EnvoyQuicClientSessionTest
 
 TEST_P(EnvoyQuicClientSessionTest, ShutdownNoOp) { http_connection_->shutdownNotice(); }
 
+#ifdef ENVOY_ENABLE_HTTP_DATAGRAMS
+// WebTransport is opt-in: the client advertises no WebTransport versions (and so will not negotiate
+// WebTransport) unless envoy.reloadable_features.quic_support_web_transport is enabled.
+TEST_P(EnvoyQuicClientSessionTest, WebTransportNegotiationGatedByRuntimeFlag) {
+  EXPECT_FALSE(envoy_quic_session_->WillNegotiateWebTransport());
+
+  TestScopedRuntime scoped_runtime;
+  scoped_runtime.mergeValues({{"envoy.reloadable_features.quic_support_web_transport", "true"}});
+  EXPECT_TRUE(envoy_quic_session_->WillNegotiateWebTransport());
+}
+#endif
+
 INSTANTIATE_TEST_SUITE_P(EnvoyQuicClientSessionTest, EnvoyQuicClientSessionTest,
                          testing::Combine(testing::ValuesIn(quic::CurrentSupportedHttp3Versions()),
                                           testing::Bool()));
@@ -565,10 +577,13 @@ TEST_P(EnvoyQuicClientSessionTest, StatelessResetOnProbingSocket) {
   EXPECT_NE(new_self_address->asString(), self_addr_->asString());
 
   // Send a STATELESS_RESET packet to the probing socket.
+  quic::StatelessResetToken reset_token =
+      GetQuicReloadableFlag(quic_check_alternate_reset_token)
+          ? frame.stateless_reset_token
+          : quic::QuicUtils::GenerateStatelessResetToken(quic::test::TestConnectionId());
   std::unique_ptr<quic::QuicEncryptedPacket> stateless_reset_packet =
-      quic::QuicFramer::BuildIetfStatelessResetPacket(
-          frame.connection_id, /*received_packet_length*/ 1200,
-          quic::QuicUtils::GenerateStatelessResetToken(quic::test::TestConnectionId()));
+      quic::QuicFramer::BuildIetfStatelessResetPacket(frame.connection_id,
+                                                      /*received_packet_length*/ 1200, reset_token);
   Buffer::RawSlice slice;
   slice.mem_ = const_cast<char*>(stateless_reset_packet->data());
   slice.len_ = stateless_reset_packet->length();
@@ -588,7 +603,7 @@ TEST_P(EnvoyQuicClientSessionTest, StatelessResetOnProbingSocket) {
 
 TEST_P(EnvoyQuicClientSessionTest, EcnReportingIsEnabled) {
   const Network::ConnectionSocketPtr& socket = quic_connection_->connectionSocket();
-  absl::optional<Network::Address::IpVersion> version = socket->ipVersion();
+  std::optional<Network::Address::IpVersion> version = socket->ipVersion();
   EXPECT_TRUE(version.has_value());
   int optval;
   socklen_t optlen = sizeof(optval);
@@ -603,7 +618,7 @@ TEST_P(EnvoyQuicClientSessionTest, EcnReportingIsEnabled) {
 }
 
 TEST_P(EnvoyQuicClientSessionTest, EcnReporting) {
-  absl::optional<Network::Address::IpVersion> version = peer_socket_->ipVersion();
+  std::optional<Network::Address::IpVersion> version = peer_socket_->ipVersion();
   EXPECT_TRUE(version.has_value());
   // Make the peer socket send ECN marks
   Api::SysCallIntResult rv;

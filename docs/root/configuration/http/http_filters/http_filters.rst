@@ -9,10 +9,13 @@ HTTP filters
   a2a_filter
   adaptive_concurrency_filter
   admission_control_filter
+  aws_eventstream_parser_filter
+  ai_protocol_manager_filter
   aws_lambda_filter
   api_key_auth_filter
   aws_request_signing_filter
   bandwidth_limit_filter
+  bandwidth_share_filter
   basic_auth_filter
   buffer_filter
   cache_filter
@@ -74,5 +77,6 @@ HTTP filters
   tap_filter
   thrift_to_metadata_filter
   upstream_codec_filter
+  upstream_rbac_filter
   wasm_filter
   transform_filter

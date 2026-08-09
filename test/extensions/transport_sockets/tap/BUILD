@@ -5,6 +5,8 @@ load(
 )
 load(
     "//test/extensions:extensions_build_system.bzl",
+    "envoy_extension_benchmark_test",
+    "envoy_extension_cc_benchmark_binary",
     "envoy_extension_cc_test",
 )
 
@@ -23,6 +25,26 @@ envoy_extension_cc_test(
         "//test/mocks/network:network_mocks",
         "//test/test_common:simulated_time_system_lib",
     ],
+)
+
+envoy_extension_cc_benchmark_binary(
+    name = "tap_socket_speed_test",
+    srcs = envoy_select_admin_functionality(["tap_socket_speed_test.cc"]),
+    extension_names = ["envoy.transport_sockets.tap"],
+    deps = [
+        "//source/common/buffer:buffer_lib",
+        "//source/common/stats:isolated_store_lib",
+        "//source/extensions/transport_sockets/tap:tap_lib",
+        "//test/mocks/network:network_mocks",
+        "@benchmark",
+        "@envoy_api//envoy/extensions/transport_sockets/tap/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_extension_benchmark_test(
+    name = "tap_socket_benchmark_test",
+    benchmark_binary = "tap_socket_speed_test",
+    extension_names = ["envoy.transport_sockets.tap"],
 )
 
 envoy_extension_cc_test(
@@ -44,5 +66,6 @@ envoy_extension_cc_test(
         "@envoy_api//envoy/extensions/transport_sockets/raw_buffer/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/transport_sockets/tap/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/transport_sockets/tls/v3:pkg_cc_proto",
+        "@envoy_api//envoy/type/v3:pkg_cc_proto",
     ],
 )
